@@ -53,14 +53,6 @@ npm run dev
 ## Report (LaTeX)
 The report source is in `report/report.tex`.
 
-Compile (example):
-
-```powershell
-cd report
-pdflatex report.tex
-pdflatex report.tex
-```
-
 ## Notes for grading
-- Every API response includes `X-Student-ID: <value of STUDENT_ID>` via FastAPI middleware.
+- Every API response includes `X-Student-ID: BSCS23070` via FastAPI middleware.
 - The Clerk webhook endpoint is `POST /webhooks/clerk`.

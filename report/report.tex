@@ -4,7 +4,8 @@
 \usepackage{enumitem}
 \usepackage{hyperref}
 \usepackage{microtype}
-\usepackage{pgf-umlsd}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
 
 \setlist[itemize]{nosep,leftmargin=*}
 \setlist[enumerate]{nosep,leftmargin=*}
@@ -63,32 +64,61 @@
 \subsubsection*{UML Sequence Diagram (Two Concurrent Editors)}
 \begin{center}
 \footnotesize
-\begin{sequencediagram}
-  \newthread{A}{Client A}
-  \newthread{B}{Client B}
-  \newinst[2]{API}{FastAPI}
-  \newinst[2]{DB}{DB}
+\begin{tikzpicture}[
+  >=Latex,
+  every node/.style={font=\footnotesize},
+  participant/.style={rectangle, draw, thick, minimum width=1.5cm,
+                      minimum height=0.55cm, align=center, fill=white},
+  msg/.style={->, thick}
+]
 
-  \mess{A}{GET doc(id)}{API}
-  \mess{API}{SELECT doc}{DB}
-  \mess{DB}{doc, v=7}{API}
-  \mess{API}{doc, v=7}{A}
+\def\seqXA{0}
+\def\seqXB{3.5}
+\def\seqXAPI{7}
+\def\seqXDB{10.8}
 
-  \mess{B}{GET doc(id)}{API}
-  \mess{API}{SELECT doc}{DB}
-  \mess{DB}{doc, v=7}{API}
-  \mess{API}{doc, v=7}{B}
+\node[participant] at (\seqXA, 0)   (boxA)   {Client A};
+\node[participant] at (\seqXB, 0)   (boxB)   {Client B};
+\node[participant] at (\seqXAPI, 0) (boxAPI) {FastAPI};
+\node[participant] at (\seqXDB, 0)  (boxDB)  {DB};
 
-  \mess{A}{PUT doc(expectedVersion=7)}{API}
-  \mess{API}{UPDATE ... WHERE id AND version=7}{DB}
-  \mess{DB}{1 row updated (v=8)}{API}
-  \mess{API}{200 OK (v=8)}{A}
+\draw[dashed, thin] (\seqXA,  -0.3) -- (\seqXA,  -11.2);
+\draw[dashed, thin] (\seqXB,  -0.3) -- (\seqXB,  -11.2);
+\draw[dashed, thin] (\seqXAPI,-0.3) -- (\seqXAPI,-11.2);
+\draw[dashed, thin] (\seqXDB, -0.3) -- (\seqXDB, -11.2);
 
-  \mess{B}{PUT doc(expectedVersion=7)}{API}
-  \mess{API}{UPDATE ... WHERE id AND version=7}{DB}
-  \mess{DB}{0 rows updated}{API}
-  \mess{API}{409 Conflict (latest v=8)}{B}
-\end{sequencediagram}
+\draw[msg] (\seqXA, -0.9)  -- (\seqXAPI,-0.9)  node[midway,above]{GET doc(id)};
+\draw[msg] (\seqXAPI,-1.5) -- (\seqXDB, -1.5)  node[midway,above]{SELECT doc};
+\draw[msg] (\seqXDB, -2.1) -- (\seqXAPI,-2.1)  node[midway,above]{doc, v=7};
+\draw[msg] (\seqXAPI,-2.7) -- (\seqXA,  -2.7)  node[midway,above]{doc, v=7};
+
+\draw[msg] (\seqXB,  -3.5) -- (\seqXAPI,-3.5)  node[midway,above]{GET doc(id)};
+\draw[msg] (\seqXAPI,-4.1) -- (\seqXDB, -4.1)  node[midway,above]{SELECT doc};
+\draw[msg] (\seqXDB, -4.7) -- (\seqXAPI,-4.7)  node[midway,above]{doc, v=7};
+\draw[msg] (\seqXAPI,-5.3) -- (\seqXB,  -5.3)  node[midway,above]{doc, v=7};
+
+\draw[msg] (\seqXA,  -6.1) -- (\seqXAPI,-6.1)
+           node[midway,above]{PUT doc (expectedVersion=7)};
+\draw[msg] (\seqXAPI,-6.7) -- (\seqXDB, -6.7)
+           node[midway,above]{UPDATE \ldots{} WHERE id AND version=7};
+\draw[msg] (\seqXDB, -7.3) -- (\seqXAPI,-7.3)
+           node[midway,above]{1 row updated (v=8)};
+\draw[msg] (\seqXAPI,-7.9) -- (\seqXA,  -7.9)  node[midway,above]{200 OK (v=8)};
+
+\draw[msg] (\seqXB,  -8.7) -- (\seqXAPI,-8.7)
+           node[midway,above]{PUT doc (expectedVersion=7)};
+\draw[msg] (\seqXAPI,-9.3) -- (\seqXDB, -9.3)
+           node[midway,above]{UPDATE \ldots{} WHERE id AND version=7};
+\draw[msg] (\seqXDB, -9.9) -- (\seqXAPI,-9.9)  node[midway,above]{0 rows updated};
+\draw[msg] (\seqXAPI,-10.5)-- (\seqXB,  -10.5)
+           node[midway,above]{409 Conflict (latest v=8)};
+
+\node[participant] at (\seqXA,  -11.2) {Client A};
+\node[participant] at (\seqXB,  -11.2) {Client B};
+\node[participant] at (\seqXAPI,-11.2) {FastAPI};
+\node[participant] at (\seqXDB, -11.2) {DB};
+
+\end{tikzpicture}
 \end{center}
 
 \subsection*{Fix for Problem 2: Fault-Tolerant Webhook Handling (Inbox + Idempotency + Retry/DLQ)}
@@ -120,7 +150,33 @@
 \end{itemize}
 
 \section*{Part 3 --- Code Implemented}
-Implemented \textbf{Problem 2 (Coordination)} in the FastAPI backend using an inbox table, idempotency, retries with backoff,
-DLQ marking, and a background worker that applies pending events.
+I implemented \textbf{Problem 2 (Coordination)} in the FastAPI backend using an inbox table (durable event storage),
+idempotency, and a retryable processor so a transient failure cannot permanently desynchronize Clerk and the local database.
+
+\subsection*{Implementation Summary (Backend)}
+\begin{itemize}
+  \item \textbf{Webhook endpoint acknowledges quickly:} \texttt{POST /webhooks/clerk} verifies the Svix/Clerk signature,
+  then persists the event and immediately returns \texttt{accepted}. Processing is not done inline, so a slow DB or transient
+  exception does not cause Clerk to time out and drop the event.
+
+  \item \textbf{Durable inbox table:} every delivery is stored in \texttt{webhook\_events} with a \textbf{unique} \texttt{event\_id}
+  (preferring the Svix header id). This is the idempotency key: if Clerk retries the same delivery, insertion becomes a no-op.
+
+  \item \textbf{Retry with backoff + DLQ:} the processor reads events with \texttt{status=pending} and
+  \texttt{next\_attempt\_at} $\leq$ \texttt{now}.
+  If processing fails, it increments \texttt{attempts}, records \texttt{last\_error}, and schedules the next attempt using exponential backoff.
+  After $N$ attempts, the event is marked \texttt{dead} (dead-letter) for manual inspection.
+
+  \item \textbf{Local state update:} for subscription cancellation events, the handler updates a local entitlement row
+  (\texttt{user\_entitlements.is\_premium=false}). This turns an unreliable, one-shot webhook into a reliable state transition.
+\end{itemize}
+
+\subsection*{Failure Simulation (Proof)}
+\begin{itemize}
+  \item A unit test inserts a cancellation event into the inbox and intentionally forces the first processing attempt to fail
+  (simulated transient error). The event remains \texttt{pending} with \texttt{attempts=1}.
+  \item On the next processing pass, the event succeeds and the entitlement becomes non-premium, demonstrating that a transient failure
+  does not cause permanent inconsistency.
+\end{itemize}
 
 \end{document}

@@ -2,8 +2,6 @@ import os
 from pathlib import Path
 import unittest
 
-
-# Configure an isolated sqlite DB for tests BEFORE importing app/modules.
 TEST_DB_FILE = Path(__file__).with_name('test_webhook_coordination.db')
 if TEST_DB_FILE.exists():
     TEST_DB_FILE.unlink()
@@ -13,8 +11,6 @@ os.environ['WEBHOOK_RETRY_BASE_SECONDS'] = '0'
 os.environ['WEBHOOK_RETRY_MAX_SECONDS'] = '0'
 os.environ['WEBHOOK_MAX_ATTEMPTS'] = '3'
 os.environ['WEBHOOK_WORKER_ENABLED'] = 'false'
-
-# Also satisfy the required header middleware.
 os.environ['STUDENT_ID'] = os.environ.get('STUDENT_ID', 'TEST_STUDENT_ID')
 
 
@@ -27,7 +23,6 @@ from src.app import app  # noqa: E402
 class TestWebhookCoordination(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
-        # Release any pooled connections so Windows can delete the sqlite file.
         try:
             models.engine.dispose()
         except Exception:
@@ -37,7 +32,6 @@ class TestWebhookCoordination(unittest.TestCase):
             try:
                 TEST_DB_FILE.unlink()
             except PermissionError:
-                # Best-effort cleanup; on Windows the sqlite file may remain locked by a lingering handle.
                 pass
 
     def test_student_id_header_is_present(self):
@@ -45,7 +39,6 @@ class TestWebhookCoordination(unittest.TestCase):
 
         with TestClient(app) as client:
             res = client.get('/api/quota', headers={'Authorization': 'Bearer fake'})
-            # Even on error responses, middleware must attach the header.
             self.assertIn('X-Student-ID', res.headers)
             self.assertEqual(res.headers['X-Student-ID'], os.environ['STUDENT_ID'])
 
@@ -114,8 +107,6 @@ class TestWebhookCoordination(unittest.TestCase):
             db.refresh(event)
             self.assertEqual(event.attempts, 1)
             self.assertEqual(event.status, webhook_processor.PENDING_STATUS)
-
-            # Second attempt should succeed.
             webhook_processor.process_due_events(db, limit=1)
             db.refresh(event)
 

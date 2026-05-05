@@ -84,8 +84,6 @@ def _handle_clerk_event(db: Session, event_type: str, payload: dict) -> None:
         set_user_premium(db, user_id, False)
         return
 
-    # Ignore other event types.
-
 
 def process_event(db: Session, event: models.WebhookEvent) -> bool:
     """Process a single stored webhook event.
@@ -139,16 +137,12 @@ def process_due_events(db: Session, limit: int = 10) -> int:
 
     processed_count = 0
     for event in due_events:
-        # Best-effort claim to reduce duplicate processing when multiple workers exist.
         event.status = PROCESSING_STATUS
         db.commit()
 
-        # Re-fetch in case the session state got stale after commit.
         event = db.query(models.WebhookEvent).filter(models.WebhookEvent.id == event.id).first()
         if not event:
             continue
-
-        # If another worker grabbed it, skip.
         if event.status != PROCESSING_STATUS:
             continue
 

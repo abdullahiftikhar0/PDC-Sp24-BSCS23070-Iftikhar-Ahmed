@@ -56,7 +56,6 @@ async def handle_clerk_webhook(
     if not event:
         raise HTTPException(status_code=500, detail='Failed to persist webhook event')
 
-    # Kick the processor so events apply quickly, but never block Clerk's delivery.
     background_tasks.add_task(process_due_events_once)
 
     return {
