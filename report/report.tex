@@ -1,0 +1,126 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{pgf-umlsd}
+
+\setlist[itemize]{nosep,leftmargin=*}
+\setlist[enumerate]{nosep,leftmargin=*}
+
+% ---- Fill these in before submitting ----
+\newcommand{\StudentName}{Muhammad\ Abdullah}
+\newcommand{\StudentID}{BSCS23070}
+
+\title{Building Resilient Distributed Systems: StudySync}
+\author{\StudentName\ (\StudentID)}
+\date{May 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Part 1 --- Analyze the Mess (Root Causes)}
+
+\subsection*{Problem 1: Synchronization (Lost Update)}
+\begin{itemize}
+  \item \textbf{Root cause:} the backend performs a read--modify--write cycle without any concurrency control.
+  Two clients can read the same document state and then both write; the later write overwrites the earlier one.
+  \item \textbf{Where it happens:} at the database write boundary (e.g., \texttt{UPDATE documents SET ... WHERE id=?})
+  without a version predicate and without detecting write conflicts.
+  \item \textbf{Failure mode:} \emph{last-write-wins} silently violates user expectations; the API returns 200 even though it
+  discarded one user's edits.
+\end{itemize}
+
+\subsection*{Problem 2: Coordination (Dropped Clerk Webhook)}
+\begin{itemize}
+  \item \textbf{Root cause:} the system treats a webhook as a reliable one-shot message.
+  If the cancellation event is dropped (or the handler crashes mid-processing), the backend never learns the state transition.
+  \item \textbf{Why it becomes permanent:} there is no durable event log (``inbox''), no idempotency key storage, and no retry/DLQ.
+  Therefore the missing transition is never replayed, so the database remains stale forever.
+\end{itemize}
+
+\subsection*{Problem 3: Fault Tolerance (LLM Timeout Hangs the App)}
+\begin{itemize}
+  \item \textbf{Root cause:} synchronous outbound calls to the LLM with long timeouts block request workers.
+  \item \textbf{Distributed consequence:} when the LLM slows or fails, requests pile up, latency spikes, and the server becomes effectively unavailable
+  due to thread/worker exhaustion.
+\end{itemize}
+
+\section*{Part 2 --- Design a Better System}
+
+\subsection*{Fix for Problem 1: Optimistic Locking (Versioned Writes)}
+\begin{itemize}
+  \item Add an integer \texttt{version} column to each shared document row.
+  \item API contract: every \texttt{PUT/PATCH} includes \texttt{expectedVersion}.
+  \item Database update becomes conditional:
+  \begin{center}
+    \texttt{UPDATE documents SET content=?, version=version+1 WHERE id=? AND version=?}
+  \end{center}
+  \item If 0 rows are updated, return \texttt{409 Conflict} with the latest version so the client can re-fetch and retry.
+\end{itemize}
+
+\subsubsection*{UML Sequence Diagram (Two Concurrent Editors)}
+\begin{center}
+\footnotesize
+\begin{sequencediagram}
+  \newthread{A}{Client A}
+  \newthread{B}{Client B}
+  \newinst[2]{API}{FastAPI}
+  \newinst[2]{DB}{DB}
+
+  \mess{A}{GET doc(id)}{API}
+  \mess{API}{SELECT doc}{DB}
+  \mess{DB}{doc, v=7}{API}
+  \mess{API}{doc, v=7}{A}
+
+  \mess{B}{GET doc(id)}{API}
+  \mess{API}{SELECT doc}{DB}
+  \mess{DB}{doc, v=7}{API}
+  \mess{API}{doc, v=7}{B}
+
+  \mess{A}{PUT doc(expectedVersion=7)}{API}
+  \mess{API}{UPDATE ... WHERE id AND version=7}{DB}
+  \mess{DB}{1 row updated (v=8)}{API}
+  \mess{API}{200 OK (v=8)}{A}
+
+  \mess{B}{PUT doc(expectedVersion=7)}{API}
+  \mess{API}{UPDATE ... WHERE id AND version=7}{DB}
+  \mess{DB}{0 rows updated}{API}
+  \mess{API}{409 Conflict (latest v=8)}{B}
+\end{sequencediagram}
+\end{center}
+
+\subsection*{Fix for Problem 2: Fault-Tolerant Webhook Handling (Inbox + Idempotency + Retry/DLQ)}
+\begin{itemize}
+  \item \textbf{Inbox table:} persist every verified webhook event in a \texttt{webhook\_events} table with a \textbf{unique} \texttt{event\_id}
+  (e.g., Svix/Clerk's delivery id). This makes delivery \emph{durable}.
+  \item \textbf{Idempotency:} if an event id is seen again, do not re-insert; safely re-process only if needed.
+  \item \textbf{Retry with backoff:} store \texttt{attempts} and \texttt{next\_attempt\_at}; retry transient failures.
+  \item \textbf{Dead-letter queue (DLQ):} after $N$ failed attempts, mark the event \texttt{dead} for manual inspection.
+  \item \textbf{Optional reconciliation:} periodically query Clerk for authoritative subscription state to heal rare cases where
+  a webhook was never delivered.
+\end{itemize}
+
+\subsection*{Fix for Problem 3: Circuit Breaker + Fallback for LLM Calls}
+\begin{itemize}
+  \item Wrap outbound LLM calls with: (1) short timeouts, (2) a circuit breaker (open after repeated failures),
+  and (3) a fallback response.
+  \item When the circuit is open, return a fast fallback (e.g., cached example challenge, or a ``try again later'' message)
+  so the rest of the API remains responsive.
+\end{itemize}
+
+\subsection*{CAP Trade-offs (Quick Discussion)}
+\begin{itemize}
+  \item \textbf{Optimistic locking:} prefers \textbf{Consistency} for shared edits (conflicts return 409) at the cost of some \textbf{Availability}
+  during contention (clients must retry).
+  \item \textbf{Webhook inbox + retries:} prefers \textbf{Availability} of the webhook endpoint (ack quickly after persisting)
+  while achieving \textbf{eventual consistency} between Clerk and the local DB.
+  \item \textbf{Circuit breaker:} prefers \textbf{Availability/Latency} over strict completeness when the LLM is unhealthy.
+\end{itemize}
+
+\section*{Part 3 --- Code Implemented}
+Implemented \textbf{Problem 2 (Coordination)} in the FastAPI backend using an inbox table, idempotency, retries with backoff,
+DLQ marking, and a background worker that applies pending events.
+
+\end{document}
